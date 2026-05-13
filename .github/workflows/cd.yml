@@ -1,0 +1,109 @@
+name: CD - Build, Push and Deploy
+
+# Se dispara en push a main Y en pull requests hacia main
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ============================================
+  # JOB 1: Build y publicar imagen en Docker Hub
+  # ============================================
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      # Paso 1: Clonar el código del repositorio
+      - name: Checkout del codigo
+        uses: actions/checkout@v4
+
+      # Paso 2: Autenticarse en Docker Hub
+      - name: Login a Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      # Paso 3: Construir y publicar la imagen con dos tags:
+      # - El SHA del commit (para rollback preciso)
+      # - "latest" (para despliegue del más reciente)
+      - name: Build y Push de la imagen
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/mi-app:${{ github.sha }}
+            ${{ secrets.DOCKER_USERNAME }}/mi-app:latest
+
+  # ============================================
+  # JOB 2: Desplegar en el servidor remoto
+  # Solo se ejecuta si el job anterior fue exitoso
+  # ============================================
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Desplegar en servidor remoto via SSH
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            IMAGE="${{ secrets.DOCKER_USERNAME }}/mi-app:latest"
+            
+            echo "=== Iniciando despliegue de $IMAGE ==="
+            
+            # PASO 1: Descargar la nueva imagen desde Docker Hub
+            docker pull $IMAGE
+            
+            # PASO 2: Ejecutar el nuevo contenedor en puerto alterno (3001) para validación
+            docker run -d \
+              --name mi-app-new \
+              --restart unless-stopped \
+              -p 3001:3000 \
+              $IMAGE
+            
+            # PASO 3: Esperar inicialización del contenedor
+            echo "Esperando 5 segundos para que el contenedor inicialice..."
+            sleep 5
+            
+            # PASO 4: Health check — validar que la nueva versión responde correctamente
+            if curl -sf http://localhost:3001/health; then
+              echo ""
+              echo "✅ Health check exitoso. Activando nuevo contenedor..."
+              
+              # PASO 5: Detener y eliminar el contenedor anterior (si existe)
+              docker stop mi-app || true
+              docker rm mi-app || true
+              
+              # PASO 6: Exponer el nuevo contenedor en el puerto público 80
+              docker run -d \
+                --name mi-app \
+                --restart unless-stopped \
+                -p 80:3000 \
+                $IMAGE
+              
+              # PASO 7: Limpiar el contenedor de validación
+              docker rm -f mi-app-new || true
+              
+              echo "✅ Despliegue completado exitosamente."
+            else
+              echo ""
+              echo "❌ Health check FALLIDO. Cancelando despliegue."
+              echo "La versión anterior sigue activa en el puerto 80."
+              docker rm -f mi-app-new || true
+              exit 1
+            fi
+            
+            # PASO 8: Limpieza de imágenes huérfanas (libera espacio en disco)
+            docker system prune -f
+            
+            echo "=== Pipeline finalizado ==="
