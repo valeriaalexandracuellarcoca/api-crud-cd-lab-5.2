@@ -41,13 +41,26 @@ jobs:
             ${{ secrets.DOCKER_USERNAME }}/mi-app:${{ github.sha }}
             ${{ secrets.DOCKER_USERNAME }}/mi-app:latest
 
+      # Paso 4: Escaneo de vulnerabilidades con Trivy
+      - name: Escaneo de vulnerabilidades
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ secrets.DOCKER_USERNAME }}/mi-app:${{ github.sha }}
+          format: 'table'
+          exit-code: '0'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+
   # ============================================
   # JOB 2: Desplegar en el servidor remoto
   # Solo se ejecuta si el job anterior fue exitoso
+  # Vinculado al environment "production"
   # ============================================
   deploy:
     needs: build-and-push
     runs-on: ubuntu-latest
+    environment: production
 
     steps:
       - name: Desplegar en servidor remoto via SSH
