@@ -53,17 +53,16 @@ jobs:
           severity: 'CRITICAL,HIGH'
 
   # ============================================
-  # JOB 2: Desplegar en el servidor remoto
-  # Solo se ejecuta si el job anterior fue exitoso
-  # Vinculado al environment "production"
+  # JOB 2: Desplegar en STAGING
+  # Primer entorno — se despliega automáticamente
   # ============================================
-  deploy:
+  deploy-staging:
     needs: build-and-push
     runs-on: ubuntu-latest
-    environment: production
+    environment: staging
 
     steps:
-      - name: Desplegar en servidor remoto via SSH
+      - name: Desplegar en servidor STAGING via SSH
         uses: appleboy/ssh-action@v1.0.0
         with:
           host: ${{ secrets.SSH_HOST }}
@@ -72,51 +71,95 @@ jobs:
           script: |
             IMAGE="${{ secrets.DOCKER_USERNAME }}/mi-app:latest"
             
-            echo "=== Iniciando despliegue de $IMAGE ==="
+            echo "=== Iniciando despliegue en STAGING ==="
             
-            # PASO 1: Descargar la nueva imagen desde Docker Hub
             docker pull $IMAGE
             
-            # PASO 2: Ejecutar el nuevo contenedor en puerto alterno (3001) para validación
             docker run -d \
               --name mi-app-new \
               --restart unless-stopped \
               -p 3001:3000 \
               $IMAGE
             
-            # PASO 3: Esperar inicialización del contenedor
-            echo "Esperando 5 segundos para que el contenedor inicialice..."
             sleep 5
             
-            # PASO 4: Health check — validar que la nueva versión responde correctamente
             if curl -sf http://localhost:3001/health; then
               echo ""
-              echo "✅ Health check exitoso. Activando nuevo contenedor..."
+              echo "✅ Health check exitoso en STAGING. Activando..."
               
-              # PASO 5: Detener y eliminar el contenedor anterior (si existe)
               docker stop mi-app || true
               docker rm mi-app || true
               
-              # PASO 6: Exponer el nuevo contenedor en el puerto público 80
               docker run -d \
                 --name mi-app \
                 --restart unless-stopped \
                 -p 80:3000 \
                 $IMAGE
               
-              # PASO 7: Limpiar el contenedor de validación
               docker rm -f mi-app-new || true
-              
-              echo "✅ Despliegue completado exitosamente."
+              echo "✅ Despliegue en STAGING completado."
             else
               echo ""
-              echo "❌ Health check FALLIDO. Cancelando despliegue."
-              echo "La versión anterior sigue activa en el puerto 80."
+              echo "❌ Health check FALLIDO en STAGING."
               docker rm -f mi-app-new || true
               exit 1
             fi
             
-            # PASO 8: Limpieza de imágenes huérfanas (libera espacio en disco)
             docker system prune -f
+            echo "=== STAGING finalizado ==="
+
+  # ============================================
+  # JOB 3: Desplegar en PRODUCTION
+  # Solo si staging fue exitoso
+  # ============================================
+  deploy-production:
+    needs: deploy-staging
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Desplegar en servidor PRODUCTION via SSH
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            IMAGE="${{ secrets.DOCKER_USERNAME }}/mi-app:latest"
             
-            echo "=== Pipeline finalizado ==="
+            echo "=== Iniciando despliegue en PRODUCTION ==="
+            
+            docker pull $IMAGE
+            
+            docker run -d \
+              --name mi-app-new \
+              --restart unless-stopped \
+              -p 3001:3000 \
+              $IMAGE
+            
+            sleep 5
+            
+            if curl -sf http://localhost:3001/health; then
+              echo ""
+              echo "✅ Health check exitoso en PRODUCTION. Activando..."
+              
+              docker stop mi-app || true
+              docker rm mi-app || true
+              
+              docker run -d \
+                --name mi-app \
+                --restart unless-stopped \
+                -p 80:3000 \
+                $IMAGE
+              
+              docker rm -f mi-app-new || true
+              echo "✅ Despliegue en PRODUCTION completado."
+            else
+              echo ""
+              echo "❌ Health check FALLIDO en PRODUCTION."
+              docker rm -f mi-app-new || true
+              exit 1
+            fi
+            
+            docker system prune -f
+            echo "=== PRODUCTION finalizado ==="
