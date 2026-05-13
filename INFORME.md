@@ -1,8 +1,8 @@
-# 📋 Informe — Laboratorio 5.2: Pipeline de Despliegue Continuo con Docker
+# 📋 Informe — Práctica Individual: Pipeline de Despliegue Continuo con Docker
 
 **Estudiante:** Valeria Alexandra Cuellar Coca  
 **Materia:** Trabajando en la Nube  
-**Fecha:** Mayo 2026  
+**Fecha:** 13 de Mayo del 2026  
 **Repositorio:** [api-crud-cd-lab-5.2](https://github.com/valeriaalexandracuellarcoca/api-crud-cd-lab-5.2)
 
 ---
@@ -11,139 +11,128 @@
 
 ### 1.1 Arquitectura del Pipeline
 
-El pipeline de Despliegue Continuo (CD) implementado automatiza el flujo completo desde un commit en la rama `main` hasta la aplicación corriendo en producción sobre una instancia EC2 de AWS. El workflow se compone de **dos jobs secuenciales**:
+Se configuró un pipeline de Despliegue Continuo (CD) completo que automatiza el flujo desde un push a la rama `main` hasta el despliegue en **dos instancias EC2 independientes** (staging y production). El workflow consta de **tres jobs secuenciales**:
 
 ```
-Push a main → Build imagen Docker → Push a Docker Hub → SSH a EC2 → Health check → Swap de contenedores
+Push a main → Build + Push Docker Hub → Escaneo Trivy → Deploy Staging → Deploy Production
 ```
 
-| Job | Descripción | Dependencia |
-|---|---|---|
-| `build-and-push` | Construye la imagen Docker y la publica en Docker Hub con dos tags: el SHA del commit y `latest` | Ninguna |
-| `deploy` | Se conecta por SSH al servidor EC2, descarga la nueva imagen y la despliega con validación previa | `build-and-push` |
+| Job | Environment | Descripción | Dependencia |
+|---|---|---|---|
+| `build-and-push` | — | Construye la imagen Docker, la publica en Docker Hub y ejecuta escaneo de vulnerabilidades con Trivy | Ninguna |
+| `deploy-staging` | `staging` | Despliega en la instancia EC2 de staging con health check previo | `build-and-push` |
+| `deploy-production` | `production` | Despliega en la instancia EC2 de producción con health check previo | `deploy-staging` |
 
 ### 1.2 Decisiones Técnicas
 
 #### Dockerfile Multi-Stage
 
-Se optó por un **build de múltiples etapas** para optimizar la imagen final:
+Se implementó un **build de múltiples etapas** para optimizar el tamaño y la seguridad de la imagen final:
 
-- **Etapa 1 (Builder):** Instala todas las dependencias usando `npm ci --only=production` sobre `node:20-alpine`.
-- **Etapa 2 (Runtime):** Copia únicamente los artefactos necesarios (`node_modules`, `package.json`, `app.js`, `server.js`) desde el builder, descartando herramientas de compilación innecesarias.
+- **Etapa 1 (Builder):** Utiliza `node:20-alpine` como base. Instala las dependencias de producción con `npm ci --only=production`, aprovechando la caché de Docker al copiar `package*.json` antes del código fuente.
+- **Etapa 2 (Runtime):** Copia exclusivamente los artefactos necesarios (`node_modules`, `package.json`, `app.js`, `server.js`) desde el builder, descartando cualquier herramienta de compilación intermedia.
 
 **Ventajas obtenidas:**
 - Imagen final significativamente más liviana (solo runtime + código).
 - Menor superficie de ataque al no incluir herramientas de build.
-- Mejor aprovechamiento de la caché de Docker al copiar `package*.json` antes del código fuente.
+- Mejor aprovechamiento de la caché de capas de Docker.
 
 #### Usuario no-root en el contenedor
 
-Se creó un usuario `appuser` dentro del contenedor para ejecutar la aplicación sin privilegios de root, siguiendo las buenas prácticas de seguridad en contenedores.
+Se creó un usuario `appuser` dentro del contenedor mediante `addgroup` y `adduser`. La aplicación se ejecuta con este usuario sin privilegios de root, siguiendo las buenas prácticas de seguridad en contenedores.
 
 #### Etiquetado dual de imágenes
 
 Cada imagen se publica con **dos tags**:
-- `latest`: permite al servidor siempre descargar la versión más reciente con `docker pull`.
-- `SHA del commit` (ej. `a1b2c3d...`): permite hacer rollback preciso a cualquier versión anterior sin ambigüedad.
+- **`latest`**: permite al servidor descargar siempre la versión más reciente con `docker pull`.
+- **SHA del commit** (ej. `d1bf0fb...`): permite realizar rollback preciso a cualquier versión anterior sin ambigüedad.
 
 #### Estrategia de despliegue Blue-Green simplificada
 
-El script de deploy no reemplaza el contenedor activo directamente. En su lugar:
+En cada entorno (staging y production), el script de deploy no reemplaza el contenedor activo directamente. En su lugar:
 
 1. Lanza el nuevo contenedor en el **puerto 3001** (puerto alterno de validación).
 2. Espera 5 segundos para la inicialización.
 3. Ejecuta un **health check** (`curl -sf http://localhost:3001/health`).
 4. **Solo si el health check es exitoso**, detiene el contenedor anterior y expone el nuevo en el **puerto 80**.
-5. Si el health check falla, elimina el contenedor nuevo y sale con `exit 1`, dejando la versión anterior intacta.
+5. Si el health check falla, elimina el contenedor nuevo y sale con `exit 1`, manteniendo la versión anterior intacta.
 
 Esta estrategia garantiza **cero downtime** en caso de que la nueva versión tenga errores críticos.
 
+#### Dos entornos con instancias EC2 independientes
+
+Se configuraron **dos GitHub Environments** (`staging` y `production`), cada uno con sus propios **Environment Secrets** apuntando a instancias EC2 diferentes:
+
+| Environment | Secrets | Instancia EC2 |
+|---|---|---|
+| `staging` | `SSH_HOST`, `SSH_USER`, `SSH_PRIVATE_KEY` | EC2 de staging |
+| `production` | `SSH_HOST`, `SSH_USER`, `SSH_PRIVATE_KEY` | EC2 de producción |
+
+Los secretos `DOCKER_USERNAME` y `DOCKER_PASSWORD` se mantienen como **Repository Secrets** compartidos por ambos entornos.
+
 #### Gestión segura de secretos
 
-Todas las credenciales sensibles se almacenan como **GitHub Repository Secrets**:
-- `DOCKER_USERNAME` y `DOCKER_PASSWORD` (Access Token de Docker Hub).
-- `SSH_HOST`, `SSH_USER` y `SSH_PRIVATE_KEY` para la conexión remota a EC2.
-
-Ningún secreto se expone en el código fuente ni en los logs del pipeline.
+Ningún secreto se expone en el código fuente ni en los logs del pipeline. Las credenciales de Docker Hub se almacenan a nivel de repositorio, mientras que las credenciales SSH son específicas de cada environment.
 
 ---
 
-## 2. Evidencia del Pipeline en GitHub Actions
+## 2. Capturas del Pipeline en GitHub Actions
 
-### 2.1 Vista general del workflow ejecutándose
+### 2.1 Vista general del workflow con los 3 jobs
 
-> **(CAPTURA 1 — Paso 5.4):** 
+> **(CAPTURA — Pestaña Actions):** Capturar el workflow "CD - Build, Push and Deploy" mostrando los tres jobs (`build-and-push`, `deploy-staging`, `deploy-production`) completados con ✅.
 
-![Vista general del pipeline en Actions](image.png)
+![Vista general del pipeline](image-9.png)
 
 ### 2.2 Detalle del job `build-and-push`
 
-> **(CAPTURA 2 — Paso 5.4):** 
+> **(CAPTURA — Job build-and-push):** Expandir los steps del job mostrando: Checkout, Login a Docker Hub, Build y Push, y Escaneo de vulnerabilidades completados.
 
-![Detalle del job build-and-push](image-1.png)
+![Job build-and-push](image-1.png)
 
-### 2.3 Detalle del job `deploy`
+### 2.3 Detalle del job `deploy-staging`
 
-> **(CAPTURA 3 — Paso 5.4):** 
+> **(CAPTURA — Job deploy-staging):** Expandir el step SSH mostrando los mensajes de despliegue en staging con "✅ Health check exitoso en STAGING" y "✅ Despliegue en STAGING completado".
 
-![Detalle del job deploy](image-2.png)
+![Job deploy-staging](image-10.png)
 
----
+### 2.4 Detalle del job `deploy-production`
 
-## 3. Aplicación Funcionando en la Instancia Remota
+> **(CAPTURA — Job deploy-production):** Expandir el step SSH mostrando los mensajes de despliegue en producción con "✅ Health check exitoso en PRODUCTION" y "✅ Despliegue en PRODUCTION completado".
 
-### 3.1 Endpoint `/health` desde el navegador
-
-> **(CAPTURA 4 — Paso 5.5):** 
-
-![Health check desde el navegador](image-3.png)
-
-### 3.2 Endpoint raíz `/` desde el navegador
-
-> **(CAPTURA 5 — Paso 5.5):** 
-
-![Endpoint raíz desde el navegador](image-4.png)
-
-### 3.3 Verificación con `docker ps` en el servidor EC2
-
-> **(CAPTURA 6 — Paso 5.5):** 
-
-![Docker ps en EC2](image-5.png)
+![Job deploy-production](image-11.png)
 
 ---
 
-## 4. Verificación del Despliegue y Actualización Automática
+## 3. Aplicación Funcionando en las Instancias Remotas
 
-### 4.1 Despliegue de una nueva versión (v2.0.0)
+### 3.1 Staging — Endpoint `/health`
 
-Se modificó el endpoint `/health` en `app.js` para retornar `version: '2.0.0'` y se realizó push a `main`. El pipeline se disparó automáticamente y desplegó la nueva versión.
+> **(CAPTURA — Navegador):** Visitar `http://IP_STAGING/health` y capturar la respuesta JSON.
 
-> **(CAPTURA 7 — Ejercicio 3.4, Paso 6.1):** 
+![Health check en staging](image-12.png)
 
-![Health check v2.0.0](image-6.png)
+### 3.2 Production — Endpoint `/health`
 
-### 4.2 Simulación de fallo del health check
+> **(CAPTURA — Navegador):** Visitar `http://IP_PRODUCTION/health` y capturar la respuesta JSON.
 
-Se introdujo un error deliberado (comentando el endpoint `/health`) para verificar que el mecanismo de protección funciona correctamente.
+![Health check en production](image-3.png)
 
-**Resultado esperado:**
-- El job `build-and-push` termina exitosamente ✅ (la imagen se construye sin problemas).
-- El job `deploy` falla con ❌ porque el health check no recibe respuesta.
-- La versión anterior **sigue funcionando** en el puerto 80 sin interrupción.
+### 3.3 Verificación con `docker ps` en ambos servidores
 
-> **(CAPTURA 8 — Ejercicio 3.4, Paso 6.2):** Comentar el endpoint `/health`, hacer push, y capturar en GitHub Actions el job `deploy` fallando con ❌ mostrando "Health check FALLIDO".
+> **(CAPTURA — Terminal SSH):** Conectarse a cada EC2 y ejecutar `docker ps`. Capturar mostrando el contenedor `mi-app` corriendo y mapeado al puerto 80.
 
-![Fallo del health check en Actions](image-7.png)
+![Docker ps en staging](image-13.png)
 
-> **(CAPTURA 9 — Ejercicio 3.4, Paso 6.2):** Después del fallo, verificar que la API anterior sigue funcionando visitando `http://IP_PUBLICA_EC2/health` y capturando que aún responde la versión anterior.
-
-![API anterior sigue funcionando](image-8.png)
+![Docker ps en production](image-14.png)
 
 ---
 
-## 5. Escaneo de Vulnerabilidades
+## 4. Escaneo de Vulnerabilidades
 
-Se integró un paso de escaneo de vulnerabilidades en el pipeline utilizando **Trivy** (`aquasecurity/trivy-action`), que analiza la imagen Docker publicada en busca de vulnerabilidades conocidas en el sistema operativo y las bibliotecas del proyecto.
+Se integró un paso de escaneo de vulnerabilidades en el job `build-and-push` utilizando **Trivy** (`aquasecurity/trivy-action`). Este escaneo analiza la imagen Docker publicada en busca de vulnerabilidades conocidas en el sistema operativo base y las bibliotecas del proyecto.
+
+**Configuración implementada:**
 
 ```yaml
 - name: Escaneo de vulnerabilidades
@@ -157,24 +146,26 @@ Se integró un paso de escaneo de vulnerabilidades en el pipeline utilizando **T
     severity: 'CRITICAL,HIGH'
 ```
 
-**Configuración del escaneo:**
-- **`exit-code: '0'`**: El pipeline no falla si se encuentran vulnerabilidades (solo informa). Se podría cambiar a `'1'` para bloquear despliegues con vulnerabilidades críticas.
-- **`ignore-unfixed: true`**: Ignora vulnerabilidades que aún no tienen parche disponible.
-- **`severity: 'CRITICAL,HIGH'`**: Solo reporta vulnerabilidades de severidad crítica y alta.
+| Parámetro | Valor | Justificación |
+|---|---|---|
+| `format` | `table` | Genera un reporte legible directamente en los logs de Actions |
+| `exit-code` | `0` | El pipeline no falla si se encuentran vulnerabilidades (solo informa). Se podría cambiar a `1` para bloquear despliegues con vulnerabilidades críticas |
+| `ignore-unfixed` | `true` | Ignora vulnerabilidades que aún no tienen parche disponible, reduciendo ruido en el reporte |
+| `severity` | `CRITICAL,HIGH` | Solo reporta vulnerabilidades de severidad crítica y alta, enfocando la atención en lo urgente |
 
-> **(CAPTURA 10 — Práctica Individual, después de agregar Trivy al workflow):** En GitHub Actions, expandir el step "Escaneo de vulnerabilidades" y capturar la tabla de resultados del escaneo de Trivy.
+> **(CAPTURA — Step Trivy):** En GitHub Actions, expandir el step "Escaneo de vulnerabilidades" dentro del job `build-and-push` y capturar la tabla de resultados.
 
-![Resultado del escaneo de vulnerabilidades con Trivy](./img/trivy_scan.png)
+![Escaneo de vulnerabilidades con Trivy](image-15.png)
 
 ---
 
-## 6. Procedimiento de Rollback a una Versión Anterior
+## 5. Procedimiento de Rollback a una Versión Anterior
 
-### 6.1 ¿Cuándo se necesita un rollback?
+### 5.1 ¿Cuándo se necesita un rollback?
 
 Un rollback es necesario cuando se descubre un bug en producción **después** de que el health check pasó exitosamente. El health check valida que la aplicación inicia y responde en `/health`, pero no puede detectar todos los errores de lógica de negocio.
 
-### 6.2 Pasos para ejecutar un rollback manual
+### 5.2 Pasos para ejecutar un rollback manual
 
 **Paso 1: Identificar el SHA del commit de la versión estable**
 
@@ -183,21 +174,21 @@ Un rollback es necesario cuando se descubre un bug en producción **después** d
 git log --oneline
 
 # Ejemplo de salida:
-# a1b2c3d (HEAD -> main) feat: versión con bug     ← VERSIÓN ACTUAL (con bug)
-# e4f5g6h feat: versión estable v2.0.0              ← VERSIÓN A RESTAURAR
-# i7j8k9l cd: agrega pipeline de CD
+# d1bf0fb (HEAD -> main) feat: versión con bug     ← VERSIÓN ACTUAL (con bug)
+# b374064 feat: versión estable                     ← VERSIÓN A RESTAURAR
+# 3a35655 cd: agrega pipeline de CD
 ```
 
-El SHA de la versión buena sería `e4f5g6h`.
+El SHA completo de la versión buena se obtiene con `git log` (40 caracteres).
 
 **Paso 2: Ejecutar el rollback directamente en el servidor EC2**
 
 ```bash
-# Conectarse al servidor
-ssh -i mi-llave.pem ubuntu@IP_PUBLICA_EC2
+# Conectarse al servidor de producción
+ssh -i mi-llave.pem ubuntu@IP_PRODUCTION
 
 # Definir variables
-SHA_ANTERIOR="e4f5g6h"
+SHA_ANTERIOR="b374064..."  # SHA completo del commit estable
 USUARIO="TU_USUARIO_DOCKERHUB"
 
 # Descargar la imagen de la versión anterior (existe en Docker Hub gracias al tag SHA)
@@ -220,62 +211,61 @@ curl http://localhost/health
 
 **Paso 3: Corregir el bug en el código fuente**
 
-Después de restaurar la versión estable en producción, corregir el bug en el código, hacer commit y push. El pipeline desplegará automáticamente la versión corregida.
+Después de restaurar la versión estable en producción, se corrige el bug en el código, se hace commit y push. El pipeline desplegará automáticamente la versión corregida pasando primero por staging y luego por producción.
 
-### 6.3 ¿Por qué funciona el rollback?
+### 5.3 ¿Por qué funciona el rollback?
 
-Funciona porque **cada imagen publicada en Docker Hub tiene un tag con el SHA del commit** que la generó. Esto significa que cada versión es inmutable y recuperable. No se sobreescriben las versiones anteriores, solo se actualiza el tag `latest`.
+Funciona porque **cada imagen publicada en Docker Hub tiene un tag con el SHA del commit** que la generó. Esto significa que cada versión es inmutable y recuperable. No se sobreescriben las versiones anteriores; solo se actualiza el tag `latest`.
 
-> **(CAPTURA 11 — Ejercicio 3.4, Paso 6.3):** Ir a Docker Hub, entrar al repositorio de la imagen y capturar la lista de tags mostrando múltiples versiones (latest + varios SHA).
+> **(CAPTURA — Docker Hub):** Ir a Docker Hub, entrar al repositorio de la imagen y capturar la lista de tags mostrando múltiples versiones (latest + varios SHA).
 
-![Tags en Docker Hub](./img/dockerhub_tags.png)
+![Tags en Docker Hub](image-16.png)
 
 ---
 
-## 7. Configuración de Entornos (GitHub Environments)
+## 6. Configuración de GitHub Environments
 
-Se configuraron dos entornos en GitHub: **staging** y **production**, cada uno con sus propios secretos de despliegue.
+Se configuraron dos entornos en GitHub con secretos independientes, cada uno apuntando a una instancia EC2 diferente:
 
-> **(CAPTURA 12 — Práctica Individual, Paso 7.3):** Ir a **Settings > Environments** en el repositorio de GitHub y capturar mostrando los entornos `staging` y `production` creados.
+| Environment | Secretos configurados | Propósito |
+|---|---|---|
+| `staging` | `SSH_HOST`, `SSH_USER`, `SSH_PRIVATE_KEY`, `DOCKER_USERNAME` | Primer despliegue de validación |
+| `production` | `SSH_HOST`, `SSH_USER`, `SSH_PRIVATE_KEY`, `DOCKER_USERNAME` | Despliegue final a producción |
 
-![GitHub Environments configurados](./img/github_environments.png)
-
-El workflow de deploy utiliza la directiva `environment: production` para vincular el job al entorno correspondiente y acceder a sus secretos específicos:
+El flujo del pipeline es secuencial: **staging se despliega primero**, y **solo si staging es exitoso**, se procede con production. Esto garantiza que cualquier error se detecte antes de afectar el entorno de producción.
 
 ```yaml
-deploy:
+deploy-staging:
   needs: build-and-push
-  runs-on: ubuntu-latest
+  environment: staging
+  # ...
+
+deploy-production:
+  needs: deploy-staging
   environment: production
-  steps:
-    - name: Desplegar en produccion
-      uses: appleboy/ssh-action@v1.0.0
-      with:
-        host: ${{ secrets.SSH_HOST }}
-        username: ${{ secrets.SSH_USER }}
-        key: ${{ secrets.SSH_PRIVATE_KEY }}
-        script: |
-          docker pull ${{ secrets.DOCKER_USERNAME }}/mi-app:latest
-          docker stop mi-app || true
-          docker rm mi-app || true
-          docker run -d --name mi-app --restart unless-stopped -p 80:3000 ${{ secrets.DOCKER_USERNAME }}/mi-app:latest
+  # ...
 ```
+
+> **(CAPTURA — Settings > Environments):** Capturar la sección Environments mostrando los entornos `staging` y `production` creados con sus secretos.
+
+![GitHub Environments](image-18.png)
+
 
 ---
 
-## 8. Reflexión: Ventajas de Contenedores y Despliegue Continuo
+## 7. Reflexión: Ventajas de Contenedores y Despliegue Continuo
 
-### 8.1 Ventajas de Docker en el flujo de desarrollo
+### 7.1 Ventajas de Docker en el flujo de desarrollo
 
 | Ventaja | Descripción |
 |---|---|
 | **Consistencia de entornos** | Docker garantiza que la aplicación corre exactamente igual en desarrollo, staging y producción. Se elimina el clásico problema "funciona en mi máquina". |
-| **Aislamiento** | Cada contenedor es independiente: tiene sus propias dependencias, variables de entorno y sistema de archivos. Un error en un contenedor no afecta a otros. |
+| **Aislamiento** | Cada contenedor es independiente: tiene sus propias dependencias, variables de entorno y sistema de archivos. Un error en un contenedor no afecta a otros servicios. |
 | **Portabilidad** | La imagen Docker puede ejecutarse en cualquier servidor con Docker instalado, independientemente del sistema operativo subyacente (Ubuntu, Amazon Linux, etc.). |
-| **Escalabilidad** | Es trivial levantar múltiples instancias del mismo contenedor detrás de un balanceador de carga. Herramientas como Docker Swarm o Kubernetes facilitan la orquestación. |
+| **Escalabilidad** | Es trivial levantar múltiples instancias del mismo contenedor detrás de un balanceador de carga. Herramientas como Docker Swarm o Kubernetes facilitan la orquestación a gran escala. |
 | **Versionamiento inmutable** | Cada imagen es una instantánea inmutable de la aplicación. Esto permite rollbacks instantáneos y auditoría completa del historial de despliegues. |
 
-### 8.2 Ventajas del Despliegue Continuo (CD)
+### 7.2 Ventajas del Despliegue Continuo (CD)
 
 | Ventaja | Descripción |
 |---|---|
@@ -285,33 +275,15 @@ deploy:
 | **Seguridad integrada** | El escaneo de vulnerabilidades (Trivy) se ejecuta automáticamente en cada push, detectando problemas de seguridad antes de que lleguen a producción. |
 | **Trazabilidad** | Cada despliegue está vinculado a un commit específico (tag SHA), facilitando la identificación de qué cambio introdujo un problema. |
 
-### 8.3 Aplicación en proyectos reales
+### 7.3 Aplicación en proyectos reales
 
 En un proyecto real de producción, este pipeline se extendería con:
 
 - **Tests automatizados** antes del build (unit tests, integration tests) para garantizar la calidad del código.
-- **Múltiples entornos** (development → staging → production) con aprobaciones manuales entre etapas críticas.
+- **Aprobaciones manuales** entre entornos para dar control adicional antes de desplegar a producción.
 - **Monitoreo y alertas** post-despliegue con herramientas como Prometheus, Grafana o AWS CloudWatch.
 - **Orquestación con Kubernetes** para manejar múltiples servicios, auto-scaling y self-healing.
-- **Canary deployments** o **blue-green deployments** más sofisticados para exponer gradualmente la nueva versión a un porcentaje del tráfico.
+- **Canary deployments** más sofisticados para exponer gradualmente la nueva versión a un porcentaje del tráfico antes de hacer el swap completo.
 
-La combinación de contenedores + CD representa el estándar de la industria para equipos de desarrollo modernos, permitiendo entregar valor al usuario final de forma rápida, segura y confiable.
+La combinación de contenedores Docker + despliegue continuo con múltiples entornos representa el estándar de la industria para equipos de desarrollo modernos, permitiendo entregar valor al usuario final de forma rápida, segura y confiable.
 
----
-
-## 9. Resumen de Capturas Requeridas
-
-| # | Captura | Paso de la guía | Qué capturar |
-|---|---|---|---|
-| 1 | Pipeline vista general | Paso 5.4 | Pestaña Actions, workflow con ambos jobs ✅ |
-| 2 | Job build-and-push | Paso 5.4 | Steps expandidos del job build-and-push |
-| 3 | Job deploy | Paso 5.4 | Step SSH expandido con mensajes de éxito |
-| 4 | Health check navegador | Paso 5.5 | Navegador con `http://IP/health` respondiendo |
-| 5 | Endpoint raíz navegador | Paso 5.5 | Navegador con `http://IP/` respondiendo |
-| 6 | Docker ps en EC2 | Paso 5.5 | Terminal SSH con `docker ps` mostrando mi-app |
-| 7 | Health check v2.0.0 | Ejercicio 3.4 (6.1) | Navegador mostrando `version: 2.0.0` tras actualización |
-| 8 | Health check fallido | Ejercicio 3.4 (6.2) | Actions mostrando job deploy con ❌ |
-| 9 | API sigue funcionando | Ejercicio 3.4 (6.2) | Navegador mostrando que la versión anterior sigue activa |
-| 10 | Escaneo Trivy | Práctica Individual | Step de Trivy expandido con tabla de resultados |
-| 11 | Tags Docker Hub | Ejercicio 3.4 (6.3) | Docker Hub mostrando múltiples tags de la imagen |
-| 12 | GitHub Environments | Práctica Individual (7.3) | Settings > Environments con staging y production |
