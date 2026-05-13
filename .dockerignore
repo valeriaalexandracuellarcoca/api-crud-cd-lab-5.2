@@ -1,0 +1,31 @@
+# Dependencias locales (se instalan dentro del contenedor)
+node_modules
+npm-debug.log
+yarn-error.log
+
+# Control de versiones
+.git
+.gitignore
+
+# GitHub Actions
+.github
+
+# Variables de entorno locales
+.env
+.env.local
+.env.*.local
+
+# Archivos de Docker (no se necesitan dentro del contenedor)
+Dockerfile
+.dockerignore
+
+# Archivos del sistema
+.DS_Store
+Thumbs.db
+
+# Logs
+logs
+*.log
+
+# Cobertura de tests
+coverage
