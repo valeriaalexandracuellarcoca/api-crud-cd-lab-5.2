@@ -133,11 +133,11 @@ Se introdujo un error deliberado (comentando el endpoint `/health`) para verific
 
 > **(CAPTURA 8 — Ejercicio 3.4, Paso 6.2):** Comentar el endpoint `/health`, hacer push, y capturar en GitHub Actions el job `deploy` fallando con ❌ mostrando "Health check FALLIDO".
 
-![Fallo del health check en Actions](./img/health_check_fallido.png)
+![Fallo del health check en Actions](image-7.png)
 
 > **(CAPTURA 9 — Ejercicio 3.4, Paso 6.2):** Después del fallo, verificar que la API anterior sigue funcionando visitando `http://IP_PUBLICA_EC2/health` y capturando que aún responde la versión anterior.
 
-![API anterior sigue funcionando](./img/api_sigue_funcionando.png)
+![API anterior sigue funcionando](image-8.png)
 
 ---
 
